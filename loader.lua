@@ -6,7 +6,7 @@
 local USER = "rhhhhsj-lang"
 local REPO = "OBSIDIAN-OUT"
 local BRANCH = "main"
-local FILE = "godmode.lua"
+local FILE = "gamemod.lua"
 
 -- ============================================================
 -- SOURCES (15)
