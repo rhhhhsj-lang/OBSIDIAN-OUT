@@ -1,6 +1,6 @@
 -- ============================================================
--- OBSIDIAN SAB v7 | Clean Steal a Brainrot Edition
--- Focus: Auto Steal + Farm + Protection + Movement
+-- OBSIDIAN SAB v8 | FIXED EDITION
+-- Smart Speed + Auto Steal + Magnet Collect
 -- TikTok: strayshot3 | Telegram: BB12co
 -- ============================================================
 
@@ -14,7 +14,7 @@ local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
-print("[SAB v7] loading...")
+print("[SAB v8] loading...")
 
 -- ============================================================
 -- CAPABILITY DETECTION
@@ -42,6 +42,7 @@ local State = {
     NoclipStartTime = 0,
     AutoStopTriggered = false,
     StealRemote = nil,
+    StealRemotes = {},
     Plots = {},
     StealsFired = 0,
     CashCollected = 0,
@@ -94,10 +95,6 @@ local Config = {
     PlaySoundOnWarning = true,
 }
 
-local FlyBV, FlyFG
-local NoclipSaved = {}
-local NoclipFakePos = nil
-
 -- ============================================================
 -- CHARACTER HELPERS
 -- ============================================================
@@ -111,8 +108,13 @@ local function getHumanoid()
     return c and c:FindFirstChildOfClass("Humanoid")
 end
 
+local FlyBV, FlyFG
+local SpeedBV = nil
+local NoclipSaved = {}
+local NoclipFakePos = nil
+
 -- ============================================================
--- LAYER 1: NAMECALL HOOK (Anti-Kick + Anti-Teleport)
+-- LAYER 1: NAMECALL HOOK
 -- ============================================================
 local function getGameMT()
     if not Cap.getrawmetatable then return nil end
@@ -135,14 +137,12 @@ local function installNamecallHook()
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
 
-        -- Anti-Kick
         if method == "Kick" and Config.AntiKick then
             State.BlockedKicks = State.BlockedKicks + 1
             print("[SAB] Kick blocked #" .. State.BlockedKicks)
             return nil
         end
 
-        -- Anti-Teleport
         if Config.AntiTeleport then
             if method == "Teleport" or method == "TeleportToPlaceInstance" or method == "TeleportAsync" then
                 State.BlockedTeleports = State.BlockedTeleports + 1
@@ -151,7 +151,6 @@ local function installNamecallHook()
             end
         end
 
-        -- Block anti-cheat remote fires
         if method == "FireServer" and typeof(self) == "Instance" and Config.AntiRemoteBlock then
             local n = self.Name:lower()
             if n:find("detect") or n:find("cheat") or n:find("report")
@@ -266,7 +265,6 @@ local function onWarningDetected(text)
     if now - State.LastWarningTime < 3 then return end
     State.LastWarningTime = now
     State.WarningLevel = State.WarningLevel + 1
-
     print("[WARNING] Level: " .. State.WarningLevel .. "/3 | " .. tostring(text))
 
     if Config.PlaySoundOnWarning then
@@ -297,7 +295,6 @@ local function onWarningDetected(text)
         Config.SpeedOn = false
         Config.Noclip = false
         State.NoclipActive = false
-        restoreCollides()
     end
 end
 
@@ -309,11 +306,9 @@ local function startWarningMonitor()
         while WarningMonitor.Running do
             task.wait(0.5)
             if not Config.WarningDetect then continue end
-
             local containers = {game:GetService("CoreGui")}
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
             if pg then table.insert(containers, pg) end
-
             for _, container in ipairs(containers) do
                 for _, gui in ipairs(container:GetChildren()) do
                     if gui:IsA("ScreenGui") or gui:IsA("GuiObject") then
@@ -386,8 +381,6 @@ local NoclipSpoofUpdate = 0
 
 RunService.Stepped:Connect(function()
     local now = tick()
-
-    -- Fake position
     if State.NoclipActive and Config.NoclipPositionSpoof then
         if now - NoclipSpoofUpdate > 0.5 then
             NoclipSpoofUpdate = now
@@ -399,37 +392,28 @@ RunService.Stepped:Connect(function()
         end
     end
 
-    -- Auto-stop
     if State.NoclipActive and Config.NoclipAutoStop then
         if now - State.NoclipStartTime > Config.NoclipMaxDuration then
             State.NoclipActive = false
             Config.Noclip = false
             restoreCollides()
-            print("[NOCLIP] Auto-stopped")
             State.AutoStopTriggered = true
             return
         end
     end
 
-    -- Restore if off
     if not Config.Noclip then
-        if next(NoclipSaved) then
-            restoreCollides()
-            NoclipSaved = {}
-        end
+        if next(NoclipSaved) then restoreCollides() NoclipSaved = {} end
         return
     end
 
-    -- Start
     if not State.NoclipActive then
         State.NoclipActive = true
         State.NoclipStartTime = now
         State.AutoStopTriggered = false
     end
 
-    -- Pulse when blocked
-    local blocked = isBlockedByWall()
-    if blocked and now - LastPulse > Config.NoclipPulseRate then
+    if isBlockedByWall() and now - LastPulse > Config.NoclipPulseRate then
         LastPulse = now
         if not next(NoclipSaved) then saveCollides() end
         disableCollides()
@@ -440,7 +424,6 @@ RunService.Stepped:Connect(function()
     end
 end)
 
--- Smart Dash
 local function smartDash(distance)
     distance = distance or 8
     local hrp = getHRP()
@@ -462,158 +445,56 @@ local function smartDash(distance)
 end
 
 -- ============================================================
--- AUTO STEAL ENGINE
+-- SMART SPEED (Anti Rubber-Band)
 -- ============================================================
-local function findStealRemote()
-    for _, obj in ipairs(game:GetDescendants()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            local n = obj.Name:lower()
-            if n:find("steal") or n:find("grab") or n:find("take")
-               or n == "the_real_steal_remote" then
-                State.StealRemote = obj
-                print("[STEAL] Found: " .. obj:GetFullName())
-                return true
+local function applySmartSpeed()
+    local char = getChar()
+    if not char then return end
+    local h = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not h or not hrp then return end
+
+    if Config.SpeedOn then
+        -- Keep WalkSpeed at 16 (server-safe)
+        if h.WalkSpeed ~= 16 then h.WalkSpeed = 16 end
+
+        -- Apply real speed via BodyVelocity
+        local md = h.MoveDirection
+        if md.Magnitude > 0.1 then
+            if not SpeedBV or not SpeedBV.Parent then
+                SpeedBV = Instance.new("BodyVelocity")
+                SpeedBV.MaxForce = Vector3.new(50000, 0, 50000)
+                SpeedBV.Parent = hrp
             end
+            local desired = md.Unit * Config.SpeedValue
+            desired = Vector3.new(desired.X, 0, desired.Z)
+            SpeedBV.Velocity = desired
+        else
+            if SpeedBV then SpeedBV.Velocity = Vector3.zero end
         end
-    end
-    return false
-end
-
-local function refreshPlots()
-    State.Plots = {}
-    for _, obj in ipairs(workspace:GetChildren()) do
-        local n = obj.Name:lower()
-        if n:find("plot") or n:find("base") or n:find("house") then
-            table.insert(State.Plots, obj)
-        end
-    end
-    print("[STEAL] Found " .. #State.Plots .. " plots")
-end
-
-local function isMyPlot(plot)
-    for _, v in ipairs(plot:GetChildren()) do
-        if v:IsA("StringValue") or v:IsA("ObjectValue") then
-            local n = v.Name:lower()
-            if (n:find("owner") or n:find("player")) and
-               (v.Value == LocalPlayer or tostring(v.Value) == LocalPlayer.Name) then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function findBestBrainrot()
-    local best, bestValue = nil, 0
-    for _, plot in ipairs(State.Plots) do
-        if not isMyPlot(plot) then
-            for _, item in ipairs(plot:GetDescendants()) do
-                local n = item.Name:lower()
-                if n:find("brainrot") or n:find("pet") or n:find("character") then
-                    if item:IsA("Model") or item:IsA("BasePart") then
-                        local val = 1
-                        local pv = item:FindFirstChild("Price") or item:FindFirstChild("Value") or item:FindFirstChild("Cost")
-                        if pv then val = tonumber(pv.Value) or 1 end
-                        if val > bestValue then bestValue = val best = item end
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function autoLockBase()
-    for _, plot in ipairs(State.Plots) do
-        if isMyPlot(plot) then
-            for _, obj in ipairs(plot:GetDescendants()) do
-                local n = obj.Name:lower()
-                if n:find("lock") or n:find("cage") or n:find("barrier") then
-                    if obj:IsA("ClickDetector") then
-                        pcall(function() fireclickdetector(obj) end)
-                    elseif obj:IsA("ProximityPrompt") then
-                        pcall(function() fireproximityprompt(obj) end)
-                    elseif obj:IsA("RemoteEvent") then
-                        pcall(function() obj:FireServer() end)
-                    end
-                end
-            end
-            return
-        end
+    else
+        if SpeedBV then SpeedBV:Destroy() SpeedBV = nil end
     end
 end
 
-local function autoCollectCash(range)
+-- Anti-rubberband: grab network ownership
+RunService.Heartbeat:Connect(function()
+    if not Config.SpeedOn then return end
     local hrp = getHRP()
     if not hrp then return end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local n = obj.Name:lower()
-            if n:find("cash") or n:find("coin") or n:find("money") or n:find("drop") then
-                local d = (obj.Position - hrp.Position).Magnitude
-                if d < range then
-                    hrp.CFrame = CFrame.new(obj.Position + Vector3.new(0, 2, 0))
-                    State.CashCollected = State.CashCollected + 1
-                    return
-                end
-            end
-        end
-    end
-end
+    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+end)
 
 -- ============================================================
--- LOOPS
+-- MOVEMENT LOOP
 -- ============================================================
-task.spawn(function()
-    task.wait(2)
-    findStealRemote()
-    refreshPlots()
-    task.wait(5)
-    refreshPlots()
-end)
-
--- Auto Steal Loop
-task.spawn(function()
-    while true do
-        task.wait(Config.StealDelay)
-        if Config.AutoSteal and State.StealRemote and State.StealRemote.Parent then
-            local target = Config.StealBest and findBestBrainrot() or nil
-            pcall(function()
-                if target then
-                    State.StealRemote:FireServer(target)
-                    State.StealRemote:FireServer(target.Parent)
-                else
-                    State.StealRemote:FireServer()
-                end
-                State.StealsFired = State.StealsFired + 1
-            end)
-        end
-    end
-end)
-
--- Auto Collect / Lock / Farm Loop
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if Config.AutoCollect then pcall(function() autoCollectCash(Config.CollectRange) end) end
-        if Config.AutoLock then pcall(autoLockBase) end
-        if Config.AutoFarm then pcall(function() autoCollectCash(Config.FarmRange) end) end
-    end
-end)
-
--- Movement Loop
 RunService.RenderStepped:Connect(function()
-    -- Speed
     local char = getChar()
     if not char then return end
     local h = char:FindFirstChildOfClass("Humanoid")
     if not h then return end
 
-    if Config.SpeedOn then
-        h.WalkSpeed = math.min(Config.SpeedValue, 60)
-    elseif h.WalkSpeed > 16 then
-        h.WalkSpeed = 16
-    end
+    applySmartSpeed()
 
     if Config.JumpOn then
         h.UseJumpPower = true
@@ -648,6 +529,252 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- ============================================================
+-- AUTO STEAL ENGINE v2
+-- ============================================================
+local function scanStealRemotes()
+    State.StealRemotes = {}
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            local n = obj.Name:lower()
+            if n:find("steal") or n:find("grab") or n:find("take")
+               or n:find("snatch") or n:find("pick") or n == "the_real_steal_remote" then
+                table.insert(State.StealRemotes, obj)
+                print("[STEAL] Found: " .. obj:GetFullName())
+            end
+        end
+    end
+    return #State.StealRemotes
+end
+
+local function refreshPlots()
+    State.Plots = {}
+    for _, obj in ipairs(workspace:GetChildren()) do
+        local n = obj.Name:lower()
+        if n:find("plot") or n:find("base") or n:find("house") then
+            table.insert(State.Plots, obj)
+        end
+    end
+    print("[STEAL] Found " .. #State.Plots .. " plots")
+end
+
+local function isMyPlot(plot)
+    for _, v in ipairs(plot:GetChildren()) do
+        if v:IsA("StringValue") or v:IsA("ObjectValue") then
+            local n = v.Name:lower()
+            if (n:find("owner") or n:find("player")) and
+               (v.Value == LocalPlayer or tostring(v.Value) == LocalPlayer.Name) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function findBestBrainrot()
+    local best, bestValue = nil, 0
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local n = obj.Name:lower()
+            if n:find("brainrot") or n:find("pet") or n:find("animal")
+               or n:find("character") or n:find("collectible") then
+                -- Skip if in our own plot
+                local inMyPlot = false
+                local parent = obj.Parent
+                local depth = 0
+                while parent and parent ~= workspace and depth < 10 do
+                    if isMyPlot(parent) then inMyPlot = true break end
+                    parent = parent.Parent
+                    depth = depth + 1
+                end
+                if not inMyPlot then
+                    local val = 1
+                    for _, child in ipairs(obj:GetChildren()) do
+                        if child:IsA("IntValue") or child:IsA("NumberValue") then
+                            local cn = child.Name:lower()
+                            if cn:find("price") or cn:find("value") or cn:find("cost") or cn:find("worth") then
+                                val = tonumber(child.Value) or 1
+                            end
+                        end
+                    end
+                    if val > bestValue then
+                        bestValue = val
+                        best = obj
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function trySteal(target)
+    if #State.StealRemotes == 0 then scanStealRemotes() end
+    if #State.StealRemotes == 0 then return false end
+
+    local fired = 0
+    for _, remote in ipairs(State.StealRemotes) do
+        if remote.Parent then
+            pcall(function() remote:FireServer(target) end)
+            pcall(function() remote:FireServer(target, "Steal") end)
+            pcall(function() remote:FireServer("Steal", target) end)
+            if target then
+                pcall(function() remote:FireServer(target.Name) end)
+                if target.Parent then
+                    pcall(function() remote:FireServer(target.Parent) end)
+                end
+            end
+            pcall(function() remote:FireServer() end)
+            fired = fired + 1
+        end
+    end
+    return fired > 0
+end
+
+local function autoLockBase()
+    for _, plot in ipairs(State.Plots) do
+        if isMyPlot(plot) then
+            for _, obj in ipairs(plot:GetDescendants()) do
+                local n = obj.Name:lower()
+                if n:find("lock") or n:find("cage") or n:find("barrier") then
+                    if obj:IsA("ClickDetector") then
+                        pcall(function() fireclickdetector(obj) end)
+                    elseif obj:IsA("ProximityPrompt") then
+                        pcall(function() fireproximityprompt(obj) end)
+                    elseif obj:IsA("RemoteEvent") then
+                        pcall(function() obj:FireServer() end)
+                    end
+                end
+            end
+            return
+        end
+    end
+end
+
+-- ============================================================
+-- SMART COLLECT (Magnet Effect)
+-- ============================================================
+local function getNearbyItems(range)
+    local hrp = getHRP()
+    if not hrp then return {} end
+    local myPos = hrp.Position
+    local items = {}
+
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local n = obj.Name:lower()
+            if n:find("cash") or n:find("coin") or n:find("money")
+               or n:find("drop") or n:find("bill") or n:find("dollar")
+               or n:find("banknote") or n:find("loot") then
+                local pos
+                if obj:IsA("BasePart") then
+                    pos = obj.Position
+                else
+                    local pp = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+                    if pp then pos = pp.Position end
+                end
+                if pos then
+                    local d = (pos - myPos).Magnitude
+                    if d <= range then
+                        table.insert(items, {obj = obj, dist = d, pos = pos})
+                    end
+                end
+            end
+        end
+    end
+    table.sort(items, function(a, b) return a.dist < b.dist end)
+    return items
+end
+
+local function magnetCollect(range)
+    local hrp = getHRP()
+    if not hrp then return false end
+    local items = getNearbyItems(range)
+    if #items == 0 then return false end
+
+    local item = items[1]
+    local target = item.obj
+    pcall(function()
+        if target:IsA("BasePart") then
+            target:SetNetworkOwner(LocalPlayer)
+            target.CFrame = hrp.CFrame * CFrame.new(0, 0, -2)
+        elseif target:IsA("Model") and target.PrimaryPart then
+            target.PrimaryPart:SetNetworkOwner(LocalPlayer)
+            target:PivotTo(hrp.CFrame * CFrame.new(0, 0, -2))
+        end
+    end)
+
+    for _, remote in ipairs(workspace:GetDescendants()) do
+        if remote:IsA("RemoteEvent") and remote.Name:lower():find("pick") then
+            pcall(function() remote:FireServer(target) end)
+        end
+    end
+
+    State.CashCollected = State.CashCollected + 1
+    return true
+end
+
+local function walkToItem(range)
+    local hrp = getHRP()
+    if not hrp then return false end
+    local items = getNearbyItems(range)
+    if #items == 0 then return false end
+    local item = items[1]
+    -- Only teleport if very close (safe)
+    if item.dist < 15 then
+        pcall(function()
+            hrp.CFrame = CFrame.new(item.pos + Vector3.new(0, 3, 0))
+        end)
+        State.CashCollected = State.CashCollected + 1
+    end
+    return true
+end
+
+-- ============================================================
+-- LOOPS
+-- ============================================================
+task.spawn(function()
+    task.wait(2)
+    scanStealRemotes()
+    refreshPlots()
+    task.wait(5)
+    refreshPlots()
+end)
+
+-- Auto Steal Loop
+task.spawn(function()
+    while true do
+        task.wait(Config.StealDelay)
+        if Config.AutoSteal then
+            local target = Config.StealBest and findBestBrainrot() or nil
+            local ok = trySteal(target)
+            if ok then State.StealsFired = State.StealsFired + 1 end
+        end
+    end
+end)
+
+-- Auto Collect / Farm / Lock
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if Config.AutoCollect then
+            pcall(function()
+                if not magnetCollect(Config.CollectRange) then
+                    walkToItem(Config.CollectRange)
+                end
+            end)
+        end
+        if Config.AutoFarm then
+            pcall(function()
+                if not magnetCollect(Config.FarmRange) then
+                    walkToItem(Config.FarmRange)
+                end
+            end)
+        end
+        if Config.AutoLock then pcall(autoLockBase) end
+    end
+end)
+
 UIS.JumpRequest:Connect(function()
     if Config.InfJump then
         local c = getChar()
@@ -673,7 +800,6 @@ local vp = Camera.ViewportSize
 local FW = math.clamp(vp.X * 0.92, 310, 420)
 local FH = math.clamp(vp.Y * 0.8, 480, 620)
 
--- Floating Icon
 local Icon = Instance.new("ImageButton")
 Icon.Size = UDim2.new(0, 52, 0, 52)
 Icon.Position = UDim2.new(0, 15, 0, 100)
@@ -710,7 +836,6 @@ UIS.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then iconStart = nil end
 end)
 
--- Main Window
 local Main = Instance.new("Frame")
 Main.Name = "Main"
 Main.Size = UDim2.new(0, 0, 0, FH)
@@ -724,7 +849,6 @@ Main.Parent = ScreenGui
 local MC = Instance.new("UICorner") MC.CornerRadius = UDim.new(0, 14) MC.Parent = Main
 local MStr = Instance.new("UIStroke") MStr.Color = Color3.fromRGB(255, 200, 60) MStr.Thickness = 1.5 MStr.Transparency = 0.3 MStr.Parent = Main
 
--- Header
 local Header = Instance.new("Frame")
 Header.Size = UDim2.new(1, 0, 0, 44)
 Header.BackgroundColor3 = Color3.fromRGB(28, 26, 20)
@@ -736,7 +860,7 @@ local HText = Instance.new("TextLabel")
 HText.Size = UDim2.new(1, -100, 1, 0)
 HText.Position = UDim2.new(0, 14, 0, 0)
 HText.BackgroundTransparency = 1
-HText.Text = "🥚 OBSIDIAN SAB"
+HText.Text = "🥚 OBSIDIAN SAB v8"
 HText.TextColor3 = Color3.fromRGB(255, 220, 140)
 HText.TextXAlignment = Enum.TextXAlignment.Left
 HText.Font = Enum.Font.GothamBold
@@ -767,7 +891,6 @@ CloseBtn.BorderSizePixel = 0
 CloseBtn.Parent = Header
 local CBC = Instance.new("UICorner") CBC.CornerRadius = UDim.new(0, 7) CBC.Parent = CloseBtn
 
--- Tab Bar
 local TabBar = Instance.new("ScrollingFrame")
 TabBar.Size = UDim2.new(1, -8, 0, 38)
 TabBar.Position = UDim2.new(0, 4, 0, 48)
@@ -801,7 +924,6 @@ ContentArea.Position = UDim2.new(0, 4, 0, 92)
 ContentArea.BackgroundTransparency = 1
 ContentArea.Parent = Main
 
--- Pages
 local Pages = {}
 local function makePage(name)
     local p = Instance.new("ScrollingFrame")
@@ -978,7 +1100,7 @@ local function makeButton(parent, text, cb, col)
     return B
 end
 
--- Create pages
+-- Pages
 makePage("steal")
 makePage("collect")
 makePage("move")
@@ -986,7 +1108,7 @@ makePage("noclip")
 makePage("protect")
 makePage("about")
 
--- STEAL PAGE
+-- STEAL
 local pSteal = Pages["steal"]
 makeHeader(pSteal, "💰 السرقة التلقائية")
 makeToggle(pSteal, "تفعيل السرقة", "AutoSteal")
@@ -1000,7 +1122,7 @@ stealStatus.Size = UDim2.new(1, 0, 0, 60)
 stealStatus.BackgroundColor3 = Color3.fromRGB(22, 26, 30)
 stealStatus.BackgroundTransparency = 0.2
 stealStatus.BorderSizePixel = 0
-stealStatus.Text = "  Remote: not found\n  Plots: 0\n  Steals fired: 0"
+stealStatus.Text = "  Remotes: 0\n  Plots: 0\n  Steals fired: 0"
 stealStatus.TextColor3 = Color3.fromRGB(200, 220, 240)
 stealStatus.TextXAlignment = Enum.TextXAlignment.Left
 stealStatus.TextYAlignment = Enum.TextYAlignment.Top
@@ -1010,19 +1132,33 @@ stealStatus.Parent = pSteal
 local stC = Instance.new("UICorner") stC.CornerRadius = UDim.new(0, 6) stC.Parent = stealStatus
 
 makeButton(pSteal, "🔄 إعادة فحص Remotes", function()
-    findStealRemote()
+    scanStealRemotes()
     refreshPlots()
 end, Color3.fromRGB(60, 90, 120))
 
--- COLLECT PAGE
+-- COLLECT
 local pCollect = Pages["collect"]
 makeHeader(pCollect, "💵 جمع النقود")
 makeToggle(pCollect, "تفعيل الجمع", "AutoCollect")
 makeSlider(pCollect, "نطاق الجمع", "CollectRange", 10, 200, Config.CollectRange)
-makeToggle(pCollect, "جمع تلقائي (Farm)", "AutoFarm")
-makeSlider(pCollect, "نطاق الـ Farm", "FarmRange", 20, 300, Config.FarmRange)
+makeToggle(pCollect, "Farm تلقائي", "AutoFarm")
+makeSlider(pCollect, "نطاق Farm", "FarmRange", 20, 300, Config.FarmRange)
 
--- MOVE PAGE
+local collectStatus = Instance.new("TextLabel")
+collectStatus.Size = UDim2.new(1, 0, 0, 40)
+collectStatus.BackgroundColor3 = Color3.fromRGB(22, 26, 30)
+collectStatus.BackgroundTransparency = 0.2
+collectStatus.BorderSizePixel = 0
+collectStatus.Text = "  Collected: 0"
+collectStatus.TextColor3 = Color3.fromRGB(200, 220, 240)
+collectStatus.TextXAlignment = Enum.TextXAlignment.Left
+collectStatus.TextYAlignment = Enum.TextYAlignment.Top
+collectStatus.Font = Enum.Font.Code
+collectStatus.TextSize = 10
+collectStatus.Parent = pCollect
+local cS = Instance.new("UICorner") cS.CornerRadius = UDim.new(0, 6) cS.Parent = collectStatus
+
+-- MOVE
 local pMove = Pages["move"]
 makeHeader(pMove, "🏃 السرعة")
 makeToggle(pMove, "تفعيل السرعة", "SpeedOn")
@@ -1037,14 +1173,13 @@ makeToggle(pMove, "قفز عالي", "JumpOn")
 makeSlider(pMove, "قوة القفز", "JumpValue", 50, 80, Config.JumpValue)
 makeToggle(pMove, "قفز لا محدود", "InfJump")
 
--- NOCLIP PAGE
+-- NOCLIP
 local pNC = Pages["noclip"]
 makeHeader(pNC, "🧱 Noclip ذكي")
 makeToggle(pNC, "تفعيل Noclip", "Noclip")
 makeToggle(pNC, "Auto-Stop", "NoclipAutoStop")
 makeToggle(pNC, "Position Spoof", "NoclipPositionSpoof")
 makeSlider(pNC, "Pulse Rate", "NoclipPulseRate", 0.03, 0.3, Config.NoclipPulseRate)
-makeSlider(pNC, "Raycast Distance", "NoclipRaycastDist", 1, 6, Config.NoclipRaycastDist)
 makeSlider(pNC, "Max Duration", "NoclipMaxDuration", 1, 10, Config.NoclipMaxDuration)
 
 makeHeader(pNC, "🚀 Dash آمن")
@@ -1052,21 +1187,7 @@ makeButton(pNC, "Dash قصير (8 studs)", function() smartDash(8) end, Color3.f
 makeButton(pNC, "Dash متوسط (15 studs)", function() smartDash(15) end, Color3.fromRGB(50, 90, 120))
 makeButton(pNC, "Dash طويل (25 studs)", function() smartDash(25) end, Color3.fromRGB(70, 60, 110))
 
-local ncStatus = Instance.new("TextLabel")
-ncStatus.Size = UDim2.new(1, 0, 0, 60)
-ncStatus.BackgroundColor3 = Color3.fromRGB(22, 26, 30)
-ncStatus.BackgroundTransparency = 0.2
-ncStatus.BorderSizePixel = 0
-ncStatus.Text = "  Noclip: OFF\n  Duration: 0.0s / 3s\n  Auto-Stop: ready"
-ncStatus.TextColor3 = Color3.fromRGB(200, 220, 240)
-ncStatus.TextXAlignment = Enum.TextXAlignment.Left
-ncStatus.TextYAlignment = Enum.TextYAlignment.Top
-ncStatus.Font = Enum.Font.Code
-ncStatus.TextSize = 10
-ncStatus.Parent = pNC
-local ncSC = Instance.new("UICorner") ncSC.CornerRadius = UDim.new(0, 6) ncSC.Parent = ncStatus
-
--- PROTECT PAGE
+-- PROTECT
 local pProtect = Pages["protect"]
 makeHeader(pProtect, "🛡 الحماية")
 makeToggle(pProtect, "Anti-Kick", "AntiKick")
@@ -1077,10 +1198,9 @@ makeToggle(pProtect, "Kill Monitors", "KillMonitors")
 
 makeHeader(pProtect, "⚠ كشف التحذيرات")
 makeToggle(pProtect, "مراقبة Warning", "WarningDetect")
-makeToggle(pProtect, "إيقاف تلقائي عند التحذير", "AutoDisableOnWarning")
+makeToggle(pProtect, "إيقاف تلقائي", "AutoDisableOnWarning")
 makeToggle(pProtect, "تنبيه صوتي", "PlaySoundOnWarning")
 
-makeHeader(pProtect, "📊 الحالة")
 local protectStatus = Instance.new("TextLabel")
 protectStatus.Size = UDim2.new(1, 0, 0, 100)
 protectStatus.BackgroundColor3 = Color3.fromRGB(22, 26, 28)
@@ -1114,13 +1234,11 @@ makeButton(pProtect, "🛑 إيقاف كل الميزات", function()
     Config.Noclip = false
     State.NoclipActive = false
     restoreCollides()
-    print("[SAB] All features disabled")
 end, Color3.fromRGB(120, 50, 50))
 
--- ABOUT PAGE
+-- ABOUT
 local pAbout = Pages["about"]
 makeHeader(pAbout, "الحقوق")
-
 local creditFrame = Instance.new("Frame")
 creditFrame.Size = UDim2.new(1, 0, 0, 130)
 creditFrame.BackgroundColor3 = Color3.fromRGB(28, 24, 18)
@@ -1154,7 +1272,7 @@ local c3 = Instance.new("TextLabel")
 c3.Size = UDim2.new(1, -16, 0, 20)
 c3.Position = UDim2.new(0, 8, 0, 76)
 c3.BackgroundTransparency = 1
-c3.Text = "  Steal a Brainrot Edition"
+c3.Text = "  v8 FIXED | Anti-Rubberband Speed"
 c3.TextColor3 = Color3.fromRGB(180, 180, 180)
 c3.TextXAlignment = Enum.TextXAlignment.Left
 c3.Font = Enum.Font.Gotham
@@ -1165,7 +1283,7 @@ local c4 = Instance.new("TextLabel")
 c4.Size = UDim2.new(1, -16, 0, 20)
 c4.Position = UDim2.new(0, 8, 0, 100)
 c4.BackgroundTransparency = 1
-c4.Text = "  الإصدار 7.0"
+c4.Text = "  الإصدار 8.0"
 c4.TextColor3 = Color3.fromRGB(140, 140, 140)
 c4.TextXAlignment = Enum.TextXAlignment.Left
 c4.Font = Enum.Font.Gotham
@@ -1182,7 +1300,7 @@ makeTab("الحقوق", "about")
 
 showPage("steal")
 
--- Menu control
+-- Menu
 local MenuOpen = false
 local function openMenu()
     if MenuOpen then return end
@@ -1232,22 +1350,14 @@ task.spawn(function()
                 State.WarningLevel, State.HookInstalled and "Active" or "Inactive"
             )
         end
-        if ncStatus and ncStatus.Parent then
-            local dur = State.NoclipActive and (tick() - State.NoclipStartTime) or 0
-            ncStatus.Text = string.format(
-                "  Noclip: %s\n  Duration: %.1fs / %ss\n  Auto-Stop: %s",
-                State.NoclipActive and "ON" or "OFF",
-                dur, Config.NoclipMaxDuration,
-                State.AutoStopTriggered and "triggered" or "ready"
-            )
-        end
         if stealStatus and stealStatus.Parent then
             stealStatus.Text = string.format(
-                "  Remote: %s\n  Plots: %d\n  Steals fired: %d",
-                State.StealRemote and State.StealRemote.Name or "not found",
-                #State.Plots,
-                State.StealsFired
+                "  Remotes: %d\n  Plots: %d\n  Steals fired: %d",
+                #State.StealRemotes, #State.Plots, State.StealsFired
             )
+        end
+        if collectStatus and collectStatus.Parent then
+            collectStatus.Text = string.format("  Collected: %d", State.CashCollected)
         end
     end
 end)
@@ -1255,6 +1365,7 @@ end)
 LocalPlayer.CharacterAdded:Connect(function()
     FlyBV = nil
     FlyFG = nil
+    SpeedBV = nil
     NoclipSaved = {}
     State.NoclipActive = false
     task.wait(1)
@@ -1270,7 +1381,7 @@ task.spawn(function()
     task.wait(0.5)
     if Config.KillMonitors then killMonitors() end
     startWarningMonitor()
-    print("[SAB] v7 initialized")
+    print("[SAB] v8 initialized")
 end)
 
-print("[SAB] v7 loaded. TikTok: strayshot3 | Telegram: BB12co")
+print("[SAB] v8 loaded. TikTok: strayshot3 | Telegram: BB12co")
