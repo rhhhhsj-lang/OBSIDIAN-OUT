@@ -49,6 +49,9 @@ local lastStep = 0
 local killed = 0
 local scriptsKilled = 0
 
+-- ═══════════ FORWARD DECLARE ═══════════
+local TB
+
 -- ═══════════ KILL HOSTILE SCRIPTS ═══════════
 local hostileNames = {
     "AntiCollisionHighSeedPushBack",
@@ -393,8 +396,7 @@ okBtn.MouseButton1Click:Connect(function()
     }):Play()
     task.wait(0.3)
     popup.Visible = false
-    -- show main toggle
-    TB.Visible = true
+    if TB then TB.Visible = true end
 end)
 
 -- popup entrance animation
@@ -406,7 +408,7 @@ TweenService:Create(popup, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.Easing
 }):Play()
 
 -- ═══════════ MAIN TOGGLE BUTTON ═══════════
-local TB = Instance.new("TextButton")
+TB = Instance.new("TextButton")
 TB.Size = UDim2.new(0, 65, 0, 65)
 TB.Position = UDim2.new(0, 15, 0.72, 0)
 TB.BackgroundColor3 = C.primary
